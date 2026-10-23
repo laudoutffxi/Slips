@@ -35,13 +35,14 @@ Drag the window by any empty part of it. Resize it from its bottom-right corner.
 /slips                        show / hide the window
 /slips find <item>            print which slip an item goes on, and whether it's stored
 /slips refresh                rescan your bags now
+/slips debug <slip #>         print a slip's raw data to chat (for bug reports)
 /slips reset                  re-centre the window
 ```
 
 ## Notes
 
 - **Where slips are read from:** inventory, Mog Safe 1 and 2, Storage, Mog Locker, Satchel, Sack, Case and Wardrobes 1–8, so it doesn't matter where you keep your slips.
-- **After storing:** the window rescans every second while it's open. If a slip still looks out of date after the porter moogle, zone or use `/slips refresh`.
+- **After storing:** slips listens for the server's update when you store or take items at the porter moogle, so the window changes straight away, even before the game's own copy of the slip catches up.
 - **Saved settings:** the addon writes `slips_settings.lua` (tab, switches, folded cards, window size) into its own folder. Delete it to reset.
 - **Font:** uses Segoe UI from your Windows Fonts folder (nothing is bundled). If it can't be loaded, the game's ImGui font is used.
 

@@ -5,6 +5,7 @@
     /slips                      open / close the window
     /slips find <item>          print which slip an item goes on, and whether it's stored
     /slips refresh              rescan your bags
+    /slips debug <slip #>       print a slip's raw data to chat (for bug reports)
     /slips reset                put the window back in the middle at its default size
 
     Item pictures come from the game client itself (the same icons bgwiki shows), so every item
@@ -13,7 +14,7 @@
 
 addon.name    = 'slips'
 addon.author  = 'Laudout'
-addon.version = '2.0.0'
+addon.version = '2.0.1'
 addon.desc    = 'Storage Slip viewer: every slip, every stored item with its icon, and gear ready to store.'
 
 require('common')
@@ -151,8 +152,34 @@ local function extra_bytes(extra)
     return bytes
 end
 
-local function decode(slip, extra)
-    local bytes, stored, n = extra_bytes(extra), {}, 0
+-- Slip updates sent by the server (packet 0x020). After storing at the porter
+-- moogle the server sends the slip's new contents straight away, but the copy in
+-- the client's inventory memory can lag behind. So the newest packet is used until
+-- memory catches up. slip item id -> { bytes = {...}, mem = memory signature then }
+local from_packet = {}
+
+local function sig(bytes)
+    local t = {}
+    for i = 1, 24 do t[i] = string.format('%02X', bytes[i] or 0) end
+    return table.concat(t)
+end
+
+-- Which bytes to trust for a slip right now: the server's update, or memory.
+local function slip_bytes(id, extra)
+    local mem = extra_bytes(extra)
+    local p = from_packet[id]
+    if p == nil then return mem, 'memory' end
+    local ms = sig(mem)
+    if ms ~= p.mem then
+        -- memory has changed since the packet: it has caught up (or moved on)
+        from_packet[id] = nil
+        return mem, 'memory'
+    end
+    return p.bytes, 'server update'
+end
+
+local function decode(slip, bytes)
+    local stored, n = {}, 0
     for pos = 1, #slip.items do
         local b = bytes[math.floor((pos - 1) / 8) + 1] or 0
         if bit.band(bit.rshift(b, (pos - 1) % 8), 1) == 1 then stored[pos] = true; n = n + 1 end
@@ -173,7 +200,7 @@ local function scan()
                 local slip = slip_by_id[item.Id]
                 if slip then
                     if not owned[item.Id] then owned_n = owned_n + 1 end
-                    local stored, n = decode(slip, item.Extra)
+                    local stored, n = decode(slip, (slip_bytes(item.Id, item.Extra)))
                     owned[item.Id] = { where = c[2], stored = stored, count = n }
                     total = total + n
                 elseif item_to_slip[item.Id] then
@@ -679,6 +706,60 @@ ashita.events.register('d3d_present', 'slips_present_cb', function()
 end)
 
 --------------------------------------------------------------------------------
+-- Server updates (0x020: one item's count, id, bag, slot and extdata)
+--------------------------------------------------------------------------------
+
+ashita.events.register('packet_in', 'slips_packet_cb', function(e)
+    if e.id ~= 0x020 then return end
+    local ok, b = pcall(function() return e.data:bytes() end)
+    if not ok or type(b) ~= 'table' then return end
+    local count = (b[0x05] or 0) + (b[0x06] or 0) * 256
+    local id = (b[0x0D] or 0) + (b[0x0E] or 0) * 256
+    if count == 0 or slip_by_id[id] == nil then return end
+    local bag, index = b[0x0F] or 0, b[0x10] or 0
+    local bytes = {}
+    for i = 1, 24 do bytes[i] = b[0x11 + i] or 0 end
+    -- what memory holds at this moment (the client hasn't applied the packet yet)
+    local mem = {}
+    pcall(function()
+        local item = AshitaCore:GetMemoryManager():GetInventory():GetContainerItem(bag, index)
+        if item ~= nil and item.Id == id then mem = extra_bytes(item.Extra) end
+    end)
+    if sig(mem) == sig(bytes) then
+        from_packet[id] = nil      -- memory already has it
+    else
+        from_packet[id] = { bytes = bytes, mem = sig(mem) }
+    end
+    state.last_scan = -10          -- refresh the window on the next frame
+end)
+
+local function debug_slip(arg)
+    local num = tonumber(arg)
+    local slip
+    for _, s in ipairs(slips) do if s.num == num then slip = s end end
+    if not slip then msg('Usage: /slips debug <slip number>, e.g. /slips debug 7'); return end
+    local found = false
+    pcall(function()
+        local inv = AshitaCore:GetMemoryManager():GetInventory()
+        for _, c in ipairs(CONTAINERS) do
+            for i = 0, (tonumber(inv:GetContainerCountMax(c[1])) or 0) do
+                local item = inv:GetContainerItem(c[1], i)
+                if item ~= nil and item.Id == slip.item_id and not found then
+                    found = true
+                    local mem = extra_bytes(item.Extra)
+                    local used, src = slip_bytes(slip.item_id, item.Extra)
+                    local _, n = decode(slip, used)
+                    msg(('%s in %s (slot %d): %d / %d stored, from %s'):format(slip.name, c[2], i, n, #slip.items, src))
+                    msg('memory: ' .. sig(mem))
+                    if from_packet[slip.item_id] then msg('server: ' .. sig(from_packet[slip.item_id].bytes)) end
+                end
+            end
+        end
+    end)
+    if not found then msg(slip.name .. ' is not in any of your bags.') end
+end
+
+--------------------------------------------------------------------------------
 -- Commands
 --------------------------------------------------------------------------------
 
@@ -719,13 +800,15 @@ ashita.events.register('command', 'slips_command_cb', function(e)
     elseif sub == 'refresh' then
         scan()
         msg(('Rescanned: %d of %d slips, %d items stored.'):format(state.owned_n, #slips, state.total))
+    elseif sub == 'debug' then
+        debug_slip(args[3])
     elseif sub == 'reset' then
         state.win_size = nil
         win.size, win.reset = nil, true
         state.visible[1] = true
         save_settings()
     else
-        msg('/slips  |  /slips find <item>  |  /slips refresh  |  /slips reset')
+        msg('/slips  |  /slips find <item>  |  /slips refresh  |  /slips debug <slip #>  |  /slips reset')
     end
 end)
 
